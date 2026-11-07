@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import Footer from '../components/Footer';
 import Icon from '../components/Icon';
@@ -10,8 +10,13 @@ import { timeAgo } from '../lib/format';
 
 const MAX_REVIEW = 1000;
 const PAGE_SIZE = 5;
+const EMPTY_SUMMARY = { count: 0, average: 0 };
 
-function Review({ rev, onDelete }) {
+const Stars = ({ value }) => (
+    <span className="star-blue">{'★'.repeat(value)}{'☆'.repeat(5 - value)}</span>
+);
+
+function Review({ rev, onEdit, onDelete }) {
     return (
         <div className="panel review-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
@@ -19,17 +24,20 @@ function Review({ rev, onDelete }) {
                     <div className="avatar">{rev.user.avatar}</div>
                     <div>
                         <div style={{ fontSize: 13, fontWeight: 700 }}>{rev.user.name}{rev.isMine && ' (you)'}</div>
-                        <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{timeAgo(rev.createdAt)}</div>
+                        <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+                            {timeAgo(rev.createdAt)}{rev.edited && ' • edited'}
+                        </div>
                     </div>
                 </div>
-                <div className="star-blue" style={{ fontSize: 12 }}>
-                    {'★'.repeat(rev.rating)}{'☆'.repeat(5 - rev.rating)}
-                </div>
+                <div style={{ fontSize: 12 }}><Stars value={rev.rating} /></div>
             </div>
             {rev.title && <h4 style={{ fontSize: 13, fontWeight: 600, margin: '8px 0 4px' }}>{rev.title}</h4>}
             <p style={{ fontSize: 12, color: 'var(--text-soft)', lineHeight: 1.5 }}>{rev.comment}</p>
             {rev.isMine && (
-                <button className="link-button" onClick={() => onDelete(rev)}>Delete</button>
+                <div className="review-actions">
+                    <button className="link-button edit" onClick={onEdit}>Edit</button>
+                    <button className="link-button" onClick={() => onDelete(rev)}>Delete</button>
+                </div>
             )}
         </div>
     );
@@ -44,6 +52,7 @@ export default function DetailPage() {
 function DetailContent({ id }) {
     const location = useLocation();
     const { user } = useAuth();
+    const formRef = useRef(null);
 
     const { data, loading, error, reload } = useFetch(
         (signal) => api.get(`/contents/${id}`, { signal }),
@@ -54,22 +63,26 @@ function DetailContent({ id }) {
 
     // ----- review list -----
     // `key` menandai review milik siapa yang sedang ditampung; beda key = masih memuat.
+    // `mine` = review milik user yang login (dari server, jadi tetap ada walau di luar halaman yang dimuat).
     const userKey = user?.id ?? 'guest';
-    const [rv, setRv] = useState({ key: null, reviews: [], summary: { count: 0, average: 0 }, pagination: null });
+    const [rv, setRv] = useState({ key: null, reviews: [], summary: EMPTY_SUMMARY, pagination: null, mine: null });
     const reviewsLoading = rv.key !== userKey;
     const { reviews, summary, pagination } = rv;
+    const mine = reviewsLoading ? null : rv.mine;
 
     useEffect(() => {
         let cancelled = false;
         api.get(`/contents/${id}/reviews`, { params: { page: 1, limit: PAGE_SIZE } })
             .then((d) => {
-                if (!cancelled) setRv({ key: userKey, reviews: d.reviews, summary: d.summary, pagination: d.pagination });
+                if (!cancelled) {
+                    setRv({ key: userKey, reviews: d.reviews, summary: d.summary, pagination: d.pagination, mine: d.myReview ?? null });
+                }
             })
             .catch(() => {
-                if (!cancelled) setRv({ key: userKey, reviews: [], summary: { count: 0, average: 0 }, pagination: null });
+                if (!cancelled) setRv({ key: userKey, reviews: [], summary: EMPTY_SUMMARY, pagination: null, mine: null });
             });
         return () => { cancelled = true; };
-    }, [id, userKey]); // ulangi saat login/logout agar `isMine` benar
+    }, [id, userKey]); // ulangi saat login/logout agar review milik sendiri benar
 
     const [loadingMore, setLoadingMore] = useState(false);
     const loadMore = async () => {
@@ -82,30 +95,50 @@ function DetailContent({ id }) {
         }
     };
 
-    // ----- review form -----
-    // `draft` hanya berisi yang sedang diketik; selebihnya diambil dari review milik sendiri (jika ada).
-    const mine = reviewsLoading ? undefined : reviews.find((r) => r.isMine);
+    // ----- review form (tulis baru / edit) -----
+    // `draft` hanya berisi yang sedang diketik; saat mengedit, sisanya diambil dari review milik sendiri.
+    const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState({});
-    const rating = draft.rating ?? mine?.rating ?? 4;
-    const text = draft.text ?? mine?.comment ?? '';
+    const base = editing ? mine : null;
+    const rating = draft.rating ?? base?.rating ?? 4;
+    const text = draft.text ?? base?.comment ?? '';
     const setRating = (value) => setDraft((d) => ({ ...d, rating: value }));
     const setText = (value) => setDraft((d) => ({ ...d, text: value }));
 
     const [formError, setFormError] = useState('');
     const [submitting, setSubmitting] = useState(false);
 
+    const startEdit = () => {
+        setDraft({});
+        setFormError('');
+        setEditing(true);
+        formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
+
+    const cancelEdit = () => {
+        setEditing(false);
+        setDraft({});
+        setFormError('');
+    };
+
     const submitReview = async () => {
         setFormError('');
         setSubmitting(true);
         try {
             const body = { rating, comment: text.trim() };
-            if (mine) {
+            if (editing && mine) {
                 const d = await api.patch(`/reviews/${mine.id}`, body);
-                setRv((s) => ({ ...s, reviews: s.reviews.map((r) => (r.id === mine.id ? d.review : r)), summary: d.summary }));
+                setRv((s) => ({
+                    ...s,
+                    reviews: s.reviews.map((r) => (r.id === mine.id ? d.review : r)),
+                    summary: d.summary,
+                    mine: d.review,
+                }));
             } else {
                 const d = await api.post(`/contents/${id}/reviews`, body);
-                setRv((s) => ({ ...s, reviews: [d.review, ...s.reviews], summary: d.summary }));
+                setRv((s) => ({ ...s, reviews: [d.review, ...s.reviews], summary: d.summary, mine: d.review }));
             }
+            setEditing(false);
             setDraft({});
         } catch (err) {
             setFormError(err.message);
@@ -118,8 +151,10 @@ function DetailContent({ id }) {
         if (!window.confirm('Delete your review?')) return;
         try {
             const d = await api.delete(`/reviews/${rev.id}`);
-            setRv((s) => ({ ...s, reviews: s.reviews.filter((r) => r.id !== rev.id), summary: d.summary }));
+            setRv((s) => ({ ...s, reviews: s.reviews.filter((r) => r.id !== rev.id), summary: d.summary, mine: null }));
+            setEditing(false);
             setDraft({});
+            setFormError('');
         } catch (err) {
             setFormError(err.message);
         }
@@ -142,6 +177,7 @@ function DetailContent({ id }) {
     if (!item || item.id !== id) return <div className="page">{loading && <Loading />}</div>;
 
     const hasMore = pagination && pagination.page < pagination.pages;
+    const showMine = user && mine && !editing; // tampilkan review sendiri, bukan form kosong
 
     return (
         <div className="page">
@@ -232,7 +268,9 @@ function DetailContent({ id }) {
                             </p>
                         ) : (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                                {reviews.map((rev) => <Review key={rev.id} rev={rev} onDelete={deleteReview} />)}
+                                {reviews.map((rev) => (
+                                    <Review key={rev.id} rev={rev} onEdit={startEdit} onDelete={deleteReview} />
+                                ))}
                             </div>
                         )}
 
@@ -243,58 +281,88 @@ function DetailContent({ id }) {
                         )}
                     </div>
 
-                    {/* KANAN: FORM REVIEW */}
-                    <div>
+                    {/* KANAN: REVIEW SAYA / FORM */}
+                    <div ref={formRef}>
                         <div className="panel review-form">
-                            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
-                                {mine ? 'Your review' : 'What did you think?'}
-                            </h3>
-                            <p style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 20 }}>
-                                {mine ? 'You can update or delete your review.' : 'The best discoveries start with a conversation.'}
-                            </p>
+                            {showMine ? (
+                                <>
+                                    <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Your review</h3>
+                                    <p style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 16 }}>
+                                        {timeAgo(mine.createdAt)}{mine.edited && ' • edited'}
+                                    </p>
+                                    <div style={{ fontSize: 18, marginBottom: 10 }}><Stars value={mine.rating} /></div>
+                                    {mine.title && <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{mine.title}</h4>}
+                                    <p style={{ fontSize: 12, color: 'var(--text-soft)', lineHeight: 1.6, marginBottom: 20 }}>{mine.comment}</p>
 
-                            <div className="form-field" style={{ marginBottom: 20 }}>
-                                <label className="form-label">Your rating</label>
-                                <div className="star-picker" style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-                                    {[1, 2, 3, 4, 5].map((s) => (
-                                        <span key={s} className={s <= rating ? 'on' : ''} onClick={() => setRating(s)}>★</span>
-                                    ))}
-                                    <span style={{ fontSize: 12, color: 'var(--text-dim)', alignSelf: 'center', marginLeft: 'auto', cursor: 'default' }}>
-                                        {rating}/5
-                                    </span>
-                                </div>
-                            </div>
+                                    {formError && <div className="form-error">{formError}</div>}
 
-                            <div className="form-field" style={{ marginBottom: 20 }}>
-                                <label className="form-label">Your review</label>
-                                <textarea
-                                    rows={4}
-                                    maxLength={MAX_REVIEW}
-                                    className="review-textarea"
-                                    value={text}
-                                    onChange={(e) => setText(e.target.value)}
-                                    placeholder="What stayed with you? Share your thoughts with the community..."
-                                />
-                                <div className="small-note" style={{ textAlign: 'right', marginTop: 4 }}>
-                                    {text.length}/{MAX_REVIEW}
-                                </div>
-                            </div>
-
-                            {formError && <div className="form-error">{formError}</div>}
-
-                            {user ? (
-                                <button className="btn-primary" onClick={submitReview} disabled={submitting || !text.trim()}>
-                                    <span>→</span> {submitting ? 'Saving…' : mine ? 'Update Review' : 'Submit Review'}
-                                </button>
+                                    <div style={{ display: 'flex', gap: 10 }}>
+                                        <button className="btn-primary" onClick={startEdit}>Edit review</button>
+                                        <button className="btn-soft" style={{ justifyContent: 'center' }} onClick={() => deleteReview(mine)}>
+                                            Delete
+                                        </button>
+                                    </div>
+                                </>
                             ) : (
-                                <Link to="/login" state={{ from: location.pathname }} className="btn-primary" style={{ textDecoration: 'none' }}>
-                                    Log in to write a review
-                                </Link>
-                            )}
+                                <>
+                                    <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
+                                        {editing ? 'Edit your review' : 'What did you think?'}
+                                    </h3>
+                                    <p style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 20 }}>
+                                        {editing ? 'Change your rating or your thoughts, then save.' : 'The best discoveries start with a conversation.'}
+                                    </p>
 
-                            <div className="small-note" style={{ textAlign: 'center', marginTop: 12 }}>
-                                Keep it real. Keep it spoiler-free.
-                            </div>
+                                    <div className="form-field" style={{ marginBottom: 20 }}>
+                                        <label className="form-label">Your rating</label>
+                                        <div className="star-picker" style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                                            {[1, 2, 3, 4, 5].map((s) => (
+                                                <span key={s} className={s <= rating ? 'on' : ''} onClick={() => setRating(s)}>★</span>
+                                            ))}
+                                            <span style={{ fontSize: 12, color: 'var(--text-dim)', alignSelf: 'center', marginLeft: 'auto', cursor: 'default' }}>
+                                                {rating}/5
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    <div className="form-field" style={{ marginBottom: 20 }}>
+                                        <label className="form-label">Your review</label>
+                                        <textarea
+                                            rows={4}
+                                            maxLength={MAX_REVIEW}
+                                            className="review-textarea"
+                                            value={text}
+                                            onChange={(e) => setText(e.target.value)}
+                                            placeholder="What stayed with you? Share your thoughts with the community..."
+                                        />
+                                        <div className="small-note" style={{ textAlign: 'right', marginTop: 4 }}>
+                                            {text.length}/{MAX_REVIEW}
+                                        </div>
+                                    </div>
+
+                                    {formError && <div className="form-error">{formError}</div>}
+
+                                    {user ? (
+                                        <>
+                                            <button className="btn-primary" onClick={submitReview} disabled={submitting || !text.trim()}>
+                                                <span>→</span> {submitting ? 'Saving…' : editing ? 'Save changes' : 'Submit Review'}
+                                            </button>
+                                            {editing && (
+                                                <button className="btn-soft" style={{ width: '100%', justifyContent: 'center', marginTop: 10 }} onClick={cancelEdit}>
+                                                    Cancel
+                                                </button>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <Link to="/login" state={{ from: location.pathname }} className="btn-primary" style={{ textDecoration: 'none' }}>
+                                            Log in to write a review
+                                        </Link>
+                                    )}
+
+                                    <div className="small-note" style={{ textAlign: 'center', marginTop: 12 }}>
+                                        Keep it real. Keep it spoiler-free.
+                                    </div>
+                                </>
+                            )}
                         </div>
 
                         <div style={{ fontSize: 11, color: 'var(--text-dim)', textAlign: 'center', marginTop: 16 }}>

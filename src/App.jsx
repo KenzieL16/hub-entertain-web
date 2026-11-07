@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 
 import Navbar from './components/Navbar';
@@ -31,10 +31,8 @@ function Layout() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <Layout />
-      </AuthProvider>
-    </BrowserRouter>
+    <AuthProvider>
+      <Layout />
+    </AuthProvider>
   );
 }
