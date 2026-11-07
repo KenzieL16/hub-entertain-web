@@ -1,5 +1,6 @@
 const BASE = (import.meta.env.VITE_API_URL || 'http://localhost:5000/api').replace(/\/$/, '');
 const TOKEN_KEY = 'hub_token';
+import { captureError } from './logrocket';
 
 /** remember=true -> localStorage (tetap login), false -> sessionStorage (hilang saat tab ditutup) */
 export const tokenStore = {
@@ -41,13 +42,16 @@ async function request(method, path, { body, params, signal } = {}) {
     });
   } catch (err) {
     if (err.name === 'AbortError') throw err;
+    captureError(err, { method, path });    
     throw new ApiError(0, 'Cannot reach the server. Please make sure the backend is running.');
   }
 
   const data = await res.json().catch(() => null);
 
   if (!res.ok) {
-    // Token kedaluwarsa/tidak valid: beri tahu AuthContext agar logout otomatis
+    if (res.status >= 500) {
+      captureError(new Error(`API ${res.status}: ${method} ${path}`), { message: data?.message });  // ← tambah
+    }
     if (res.status === 401 && token && !path.startsWith('/auth/login')) {
       window.dispatchEvent(new Event('auth:expired'));
     }
